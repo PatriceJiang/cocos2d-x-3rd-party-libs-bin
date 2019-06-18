@@ -82,10 +82,12 @@ if(ANDROID)
     add_subdirectory(android-specific/cpufeatures)
     add_subdirectory(android-specific/pvmp3dec)
     add_subdirectory(android-specific/tremolo)
+    add_subdirectory(android-specific/openal)
     target_link_libraries(external 
         ext_cpufeatures 
         ext_pvmp3dec 
         ext_tremolo
+        ext_openal
     )
 endif()
 
