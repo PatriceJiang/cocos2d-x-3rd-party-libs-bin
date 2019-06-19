@@ -81,15 +81,17 @@ endif()
 if(ANDROID)
     add_subdirectory(android-specific/cpufeatures)
     add_subdirectory(android-specific/pvmp3dec)
-    add_subdirectory(android-specific/tremolo)
+    #add_subdirectory(android-specific/tremolo)
     add_subdirectory(android-specific/openal)
     add_subdirectory(android-specific/mpg123)
+    add_subdirectory(android-specific/vorbis)
     target_link_libraries(external 
         ext_cpufeatures 
         ext_pvmp3dec 
-        ext_tremolo
-        ext_openal
+        #ext_tremolo
         ext_mpg123
+        ext_openal_soft
+        ext_vorbis
     )
 endif()
 

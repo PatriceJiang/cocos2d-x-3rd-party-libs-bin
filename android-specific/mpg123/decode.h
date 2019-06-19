@@ -9,6 +9,10 @@
 	initially written by Thomas Orgis, taking WRITE_SAMPLE from decode.c
 */
 #ifndef MPG123_DECODE_H
+
+
+#define real long
+
 #define MPG123_DECODE_H
 
 #define OUT_FORMATS 2 /* Only up to 16bit */

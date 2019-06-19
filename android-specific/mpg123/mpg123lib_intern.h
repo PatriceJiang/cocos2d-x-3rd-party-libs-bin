@@ -20,6 +20,8 @@
 #include "compat.h"
 #include "mpg123.h"
 
+#define real long
+
 #define SKIP_JUNK 1
 
 #ifndef M_PI
@@ -31,7 +33,6 @@
 
 /* Disable some output formats for fixed point decoder... */
 
-# define real long
 
 /*
   for fixed-point decoders, use pre-calculated tables to avoid expensive floating-point maths
@@ -55,35 +56,6 @@ static inline long scale_rounded(long x, int shift) {
 	return (x >> 1);
 }
 
-# ifdef __GNUC__
-/* for arm */
-#   define REAL_MUL_ASM(x, y, radix) \
-({ \
-	long _x=(x), _y=(y), _mull, _mulh; \
-	__asm__ ( \
-		"smull %0, %1, %2, %3 \n\t" \
-		"mov %0, %0, lsr %4 \n\t" \
-		"orr %0, %0, %1, lsl %5 \n\t" \
-		: "=&r" (_mull), "=&r" (_mulh) \
-		: "%r" (_x), "r" (_y), "M" (radix), "M" (32-(radix)) \
-	); \
-	_mull; \
-})
-
-#   define REAL_MUL_SCALE_LAYER3_ASM(x, y, radix) \
-({ \
-	long _x=(x), _y=(y), _radix=(radix), _mull, _mulh, _radix2; \
-	__asm__ ( \
-		"smull %0, %1, %3, %4 \n\t" \
-		"mov %0, %0, lsr %5 \n\t" \
-		"rsb %2, %5, #32 \n\t" \
-		"orr %0, %0, %1, lsl %2 \n\t" \
-		: "=&r" (_mull), "=&r" (_mulh), "=&r" (_radix2) \
-		: "%r" (_x), "r" (_y), "r" (_radix) \
-	); \
-	_mull; \
-})
-# endif
 
 /* I just changed the (int) to (long) there... seemed right. */
 # define DOUBLE_TO_REAL(x)					(double_to_long_rounded(x, REAL_FACTOR))
