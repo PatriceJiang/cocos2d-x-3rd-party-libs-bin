@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.6)
 set(lib_name mpg123)
 set(target_name ext_${lib_name})
 
-project(${target_name} C)
+project(${target_name} C ASM)
 
 include(../../cmake/CocosExternalConfig.cmake)
 
@@ -26,6 +26,9 @@ set(MPG123_SOURCE_FILES
     synth_arm.S
     tabinit.c
     id3.c)
+
+set_source_files_properties(synth_arm.S PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp")
+
 
 
 add_library(${target_name} STATIC ${MPG123_SOURCE_FILES})

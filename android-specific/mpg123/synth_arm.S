@@ -5,7 +5,7 @@
 	see COPYING and AUTHORS files in distribution or http://mpg123.org
 	initially written by Taihei Monma
 */
-#include <machine/cpu-features.h>
+//#include <android/cpufeatures/cpu-features.h>
 
     .text
     .align
