@@ -5,13 +5,6 @@
 	see COPYING and AUTHORS files in distribution or http://mpg123.org
 	initially written by Taihei Monma
 */
-//#include <android/cpufeatures/cpu-features.h>
-
-    .text
-    .align
-
-    .global synth_1to1_arm_asm
-    .func   synth_1to1_arm_asm
 
 #include "mangle.h"
 
@@ -26,13 +19,15 @@
 	return value: number of clipped samples
 */
 
-/*
+	.code 32
+
 	.text
 	ALIGN4
-	.global ASM_NAME(synth_1to1_arm_asm)
+	.globl ASM_NAME(synth_1to1_arm_asm)
+#ifdef __ELF__
+	.type ASM_NAME(synth_1to1_arm_asm), %function
+#endif
 ASM_NAME(synth_1to1_arm_asm):
-*/
-synth_1to1_arm_asm:
 	stmfd	sp!, {r4, r5, r6, r7, r8, r9, r10, lr}
 	
 	add		WINDOW, WINDOW, #64
@@ -45,7 +40,7 @@ synth_1to1_arm_asm:
 	
 	ldr		r5, [WINDOW], #4
 	ldr		r6, [B0], #4
-.Loop_start_1:
+1:
 	ldr		r8, [WINDOW], #4
 	ldr		r9, [B0], #4
 	mul		r7, r5, r6
@@ -108,7 +103,7 @@ synth_1to1_arm_asm:
 	strh	r7, [SAMPLES], #4
 	
 	subs	r3, r3, #1
-	bne		.Loop_start_1
+	bne		1b
 	
 	add		WINDOW, WINDOW, #4
 	add		B0, B0, #4
@@ -152,7 +147,7 @@ synth_1to1_arm_asm:
 	
 	mov		r3, #14
 	
-.Loop_start_2:
+1:
 	ldr		r8, [WINDOW], #4
 	ldr		r9, [B0], #4
 	mul		r7, r5, r6
@@ -215,7 +210,7 @@ synth_1to1_arm_asm:
 	strh	r7, [SAMPLES], #4
 	
 	subs	r3, r3, #1
-	bne		.Loop_start_2
+	bne		1b
 	
 	ldr		r8, [WINDOW], #4
 	ldr		r9, [B0], #4
@@ -267,7 +262,7 @@ synth_1to1_arm_asm:
 	add		r7, r7, r10
 	
 	cmp		r7, REG_MAX
-	movgt	r5, REG_MAX
+	movgt	r7, REG_MAX
 	addgt	REG_CLIP, REG_CLIP, #1
 	cmp		r7, #-1073741824
 	movlt	r7, #-1073741824
@@ -279,5 +274,5 @@ synth_1to1_arm_asm:
 	mov		r0, REG_CLIP
 	
 	ldmfd   sp!, {r4, r5, r6, r7, r8, r9, r10, pc}
-    .endfunc
 
+NONEXEC_STACK
