@@ -11,16 +11,19 @@
 #define MPG123_H_INTERN
 
 #define MPG123_RATES 9
-#define MPG123_ENCODINGS 10
+#define MPG123_ENCODINGS 12
 
 #include "config.h" /* Load this before _anything_ */
+#include "intsym.h" /* Prefixing of internal symbols that still are public in a static lib. */
 
-#define attribute_align_arg
+#include "abi_align.h"
 
+/* export DLL symbols */
+#if defined(WIN32) && defined(DYNAMIC_BUILD)
+#define BUILD_MPG123_DLL
+#endif
 #include "compat.h"
 #include "mpg123.h"
-
-#define real long
 
 #define SKIP_JUNK 1
 
@@ -31,8 +34,19 @@
 # define M_SQRT2	1.41421356237309504880
 #endif
 
-/* Disable some output formats for fixed point decoder... */
+#ifdef SUNOS
+#define memmove(dst,src,size) bcopy(src,dst,size)
+#endif
 
+/* We don't really do long double... there are 3 options for REAL:
+   float, long and double. */
+
+#ifdef REAL_IS_FLOAT
+#  define real float
+#elif defined(REAL_IS_FIXED)
+
+# define real  int32_t
+# define dreal int64_t
 
 /*
   for fixed-point decoders, use pre-calculated tables to avoid expensive floating-point maths
@@ -43,21 +57,114 @@
 # define REAL_RADIX				24
 # define REAL_FACTOR			16777216.0
 
-static inline long double_to_long_rounded(double x, double scalefac) {
+static inline int32_t double_to_long_rounded(double x, double scalefac)
+{
 	x *= scalefac;
 	x += (x > 0) ? 0.5 : -0.5;
-	return (long)x;
+	return (int32_t)x;
 }
 
-static inline long scale_rounded(long x, int shift) {
+static inline int32_t scale_rounded(int32_t x, int shift)
+{
 	x += (x >> 31);
 	x >>= (shift - 1);
 	x += (x & 1);
 	return (x >> 1);
 }
 
+# ifdef __GNUC__
+#  if defined(OPT_I386)
+/* for i386_nofpu decoder */
+#   define REAL_MUL_ASM(x, y, radix) \
+({ \
+	long _x=(x), _y=(y); \
+	__asm__ ( \
+		"imull %1 \n\t" \
+		"shrdl %2, %%edx, %0 \n\t" \
+		: "+&a" (_x) \
+		: "mr" (_y), "I" (radix) \
+		: "%edx", "cc" \
+	); \
+	_x; \
+})
 
-/* I just changed the (int) to (long) there... seemed right. */
+#   define REAL_MUL_SCALE_LAYER3_ASM(x, y, radix) \
+({ \
+	long _x=(x), _y=(y), _radix=(radix); \
+	__asm__ ( \
+		"imull %1 \n\t" \
+		"shrdl %%cl, %%edx, %0 \n\t" \
+		: "+&a" (_x) \
+		: "mr" (_y), "c" (_radix) \
+		: "%edx", "cc" \
+	); \
+	_x; \
+})
+#  elif defined(OPT_PPC)
+/* for powerpc */
+#   define REAL_MUL_ASM(x, y, radix) \
+({ \
+	long _x=(x), _y=(y), _mull, _mulh; \
+	__asm__ ( \
+		"mullw %0, %2, %3 \n\t" \
+		"mulhw %1, %2, %3 \n\t" \
+		"srwi %0, %0, %4 \n\t" \
+		"rlwimi %0, %1, %5, 0, %6 \n\t" \
+		: "=&r" (_mull), "=&r" (_mulh) \
+		: "r" (_x), "r" (_y), "i" (radix), "i" (32-(radix)), "i" ((radix)-1) \
+	); \
+	_mull; \
+})
+
+#   define REAL_MUL_SCALE_LAYER3_ASM(x, y, radix) \
+({ \
+	long _x=(x), _y=(y), _radix=(radix), _mull, _mulh, _radix2; \
+	__asm__ ( \
+		"mullw %0, %3, %4 \n\t" \
+		"mulhw %1, %3, %4 \n\t" \
+		"subfic %2, %5, 32 \n\t" \
+		"srw %0, %0, %5 \n\t" \
+		"slw %1, %1, %2 \n\t" \
+		"or %0, %0, %1 \n\t" \
+		: "=&r" (_mull), "=&r" (_mulh), "=&r" (_radix2) \
+		: "r" (_x), "r" (_y), "r" (_radix) \
+		: "cc" \
+	); \
+	_mull; \
+})
+#  elif defined(OPT_ARM)
+/* for arm */
+#   define REAL_MUL_ASM(x, y, radix) \
+({ \
+	long _x=(x), _y=(y), _mull, _mulh; \
+	__asm__ ( \
+		"smull %0, %1, %2, %3 \n\t" \
+		"mov %0, %0, lsr %4 \n\t" \
+		"orr %0, %0, %1, lsl %5 \n\t" \
+		: "=&r" (_mull), "=&r" (_mulh) \
+		: "r" (_x), "r" (_y), "M" (radix), "M" (32-(radix)) \
+	); \
+	_mull; \
+})
+
+#   define REAL_MUL_SCALE_LAYER3_ASM(x, y, radix) \
+({ \
+	long _x=(x), _y=(y), _radix=(radix), _mull, _mulh, _radix2; \
+	__asm__ ( \
+		"smull %0, %1, %3, %4 \n\t" \
+		"mov %0, %0, lsr %5 \n\t" \
+		"rsb %2, %5, #32 \n\t" \
+		"mov %1, %1, lsl %2 \n\t" \
+		"orr %0, %0, %1 \n\t" \
+		: "=&r" (_mull), "=&r" (_mulh), "=&r" (_radix2) \
+		: "r" (_x), "r" (_y), "r" (_radix) \
+	); \
+	_mull; \
+})
+#  endif
+# endif
+
+/* I just changed the (int) to (real) there... seemed right. */
 # define DOUBLE_TO_REAL(x)					(double_to_long_rounded(x, REAL_FACTOR))
 # define DOUBLE_TO_REAL_15(x)				(double_to_long_rounded(x, 32768.0))
 # define DOUBLE_TO_REAL_POW43(x)			(double_to_long_rounded(x, 8192.0))
@@ -69,17 +176,17 @@ static inline long scale_rounded(long x, int shift) {
 #  define REAL_MUL_15(x, y)					REAL_MUL_ASM(x, y, 15)
 #  define REAL_MUL_SCALE_LAYER12(x, y)		REAL_MUL_ASM(x, y, 15 + 30 - REAL_RADIX)
 # else
-#  define REAL_MUL(x, y)					(((long long)(x) * (long long)(y)) >> REAL_RADIX)
-#  define REAL_MUL_15(x, y)					(((long long)(x) * (long long)(y)) >> 15)
-#  define REAL_MUL_SCALE_LAYER12(x, y)		(((long long)(x) * (long long)(y)) >> (15 + 30 - REAL_RADIX))
+#  define REAL_MUL(x, y)					(((dreal)(x) * (dreal)(y)) >> REAL_RADIX)
+#  define REAL_MUL_15(x, y)					(((dreal)(x) * (dreal)(y)) >> 15)
+#  define REAL_MUL_SCALE_LAYER12(x, y)		(((dreal)(x) * (dreal)(y)) >> (15 + 30 - REAL_RADIX))
 # endif
 # ifdef REAL_MUL_SCALE_LAYER3_ASM
 #  define REAL_MUL_SCALE_LAYER3(x, y, z)	REAL_MUL_SCALE_LAYER3_ASM(x, y, 13 + gainpow2_scale[z] - REAL_RADIX)
 # else
-#  define REAL_MUL_SCALE_LAYER3(x, y, z)	(((long long)(x) * (long long)(y)) >> (13 + gainpow2_scale[z] - REAL_RADIX))
+#  define REAL_MUL_SCALE_LAYER3(x, y, z)	(((dreal)(x) * (dreal)(y)) >> (13 + gainpow2_scale[z] - REAL_RADIX))
 # endif
-# define REAL_SCALE_LAYER12(x)				((long)((x) >> (30 - REAL_RADIX)))
-# define REAL_SCALE_LAYER3(x, y)			((long)((x) >> (gainpow2_scale[y] - REAL_RADIX)))
+# define REAL_SCALE_LAYER12(x)				((real)((x) >> (30 - REAL_RADIX)))
+# define REAL_SCALE_LAYER3(x, y)			((real)((x) >> (gainpow2_scale[y] - REAL_RADIX)))
 # ifdef ACCURATE_ROUNDING
 #  define REAL_MUL_SYNTH(x, y)				REAL_MUL(x, y)
 #  define REAL_SCALE_DCT64(x)				(x)
@@ -89,12 +196,19 @@ static inline long scale_rounded(long x, int shift) {
 #  define REAL_SCALE_DCT64(x)				((x) >> 8)
 #  define REAL_SCALE_WINDOW(x)				scale_rounded(x, 16)
 # endif
-#  define REAL_SCANF "%ld"
-#  define REAL_PRINTF "%ld"
 
+#else
+/* Just define a symbol to make things clear.
+   Existing code still uses (not (float or fixed)) for that. */
+#  define REAL_IS_DOUBLE
+#  define real double
+#endif
+
+#ifndef REAL_IS_FIXED
 # if (defined SIZEOF_INT32_T) && (SIZEOF_INT32_T != 4)
 #  error "Bad 32bit types!!!"
 # endif
+#endif
 
 #ifndef DOUBLE_TO_REAL
 # define DOUBLE_TO_REAL(x)					(real)(x)
@@ -182,7 +296,17 @@ static inline long scale_rounded(long x, int shift) {
 
 int decode_update(mpg123_handle *mh);
 /* residing in format.c  */
+off_t decoder_synth_bytes(mpg123_handle *fr , off_t s);
 off_t samples_to_bytes(mpg123_handle *fr , off_t s);
 off_t bytes_to_samples(mpg123_handle *fr , off_t b);
+off_t outblock_bytes(mpg123_handle *fr, off_t s);
+/* Postprocessing format conversion of freshly decoded buffer. */
+void postprocess_buffer(mpg123_handle *fr);
+
+/* If networking is enabled and we really mean internal networking, the timeout_read function is available. */
+#if defined (NETWORK) && !defined (WANT_WIN32_SOCKETS)
+/* Does not work with win32 */
+#define TIMEOUT_READ
+#endif
 
 #endif

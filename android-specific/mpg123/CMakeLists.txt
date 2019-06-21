@@ -8,24 +8,34 @@ project(${target_name} C ASM)
 
 include(../../cmake/CocosExternalConfig.cmake)
 
+##replace-source-list-begin
 set(MPG123_SOURCE_FILES 
-    equalizer.c
-    index.c
-    layer2.c
-    synth.c
+    compat.c
+    compat_str.c
     dct64.c
+    equalizer.c
     format.c
+    frame.c
+    icy.c
+    icy2utf8.c
+    id3.c
+    index.c
+    layer1.c
+    layer2.c
     layer3.c
+    libmpg123.c
     ntom.c
+    optimize.c
     parse.c
     readers.c
-    frame.c
-    layer1.c
-    libmpg123.c
-    optimize.c
+    stringbuf.c
+    synth.c
+    synth_8bit.c
     synth_arm.S
+    synth_s32.c
     tabinit.c
-    id3.c)
+)
+##replace-source-list-end
 
 set_source_files_properties(synth_arm.S PROPERTIES COMPILE_FLAGS "-x assembler-with-cpp")
 
@@ -33,9 +43,8 @@ set_source_files_properties(synth_arm.S PROPERTIES COMPILE_FLAGS "-x assembler-w
 
 add_library(${target_name} STATIC ${MPG123_SOURCE_FILES})
 
-#target_compile_definitions(${target_name} PRIVATE "real=long")
+target_compile_definitions(${target_name} PRIVATE OPT_ARM SAFE_NTOM)
 target_compile_options(${target_name} PRIVATE "-Wno-everything")
-
 target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/mpg123)
 
 set_target_properties(${target_name} PROPERTIES

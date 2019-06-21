@@ -1,7 +1,7 @@
 /*
 	layer2.c: the layer 2 decoder, root of mpg123
 
-	copyright 1994-2008 by the mpg123 project - free software under the terms of the LGPL 2.1
+	copyright 1994-2009 by the mpg123 project - free software under the terms of the LGPL 2.1
 	see COPYING and AUTHORS files in distribution or http://mpg123.org
 	initially written by Michael Hipp
 
@@ -11,17 +11,35 @@
 
 
 #include "mpg123lib_intern.h"
+#ifndef NO_LAYER2
 #include "l2tables.h"
+#endif
 #include "getbits.h"
+
+#ifndef NO_LAYER12 /* Stuff  needed for layer I and II. */
 
 static int grp_3tab[32 * 3] = { 0, };   /* used: 27 */
 static int grp_5tab[128 * 3] = { 0, };  /* used: 125 */
 static int grp_9tab[1024 * 3] = { 0, }; /* used: 729 */
 
+#if defined(REAL_IS_FIXED) && defined(PRECALC_TABLES)
 #include "l12_integer_tables.h"
+#else
+static const double mulmul[27] =
+{
+	0.0 , -2.0/3.0 , 2.0/3.0 ,
+	2.0/7.0 , 2.0/15.0 , 2.0/31.0, 2.0/63.0 , 2.0/127.0 , 2.0/255.0 ,
+	2.0/511.0 , 2.0/1023.0 , 2.0/2047.0 , 2.0/4095.0 , 2.0/8191.0 ,
+	2.0/16383.0 , 2.0/32767.0 , 2.0/65535.0 ,
+	-4.0/5.0 , -2.0/5.0 , 2.0/5.0, 4.0/5.0 ,
+	-8.0/9.0 , -4.0/9.0 , -2.0/9.0 , 2.0/9.0 , 4.0/9.0 , 8.0/9.0
+};
+#endif
 
-void init_layer12(void) {
-	const int base[3][9] = {
+void init_layer12(void)
+{
+	const int base[3][9] =
+	{
 		{ 1 , 0, 2 , } ,
 		{ 17, 18, 0 , 19, 20 , } ,
 		{ 21, 1, 22, 23, 0, 24, 25, 2, 26 }
@@ -31,12 +49,14 @@ void init_layer12(void) {
 	int *itable;
 	int *tables[3] = { grp_3tab , grp_5tab , grp_9tab };
 
-	for(i=0;i<3;i++) {
+	for(i=0;i<3;i++)
+	{
 		itable = tables[i];
 		len = tablen[i];
 		for(j=0;j<len;j++)
 		for(k=0;k<len;k++)
-		for(l=0;l<len;l++) {
+		for(l=0;l<len;l++)
+		{
 			*itable++ = base[i][l];
 			*itable++ = base[i][k];
 			*itable++ = base[i][j];
@@ -44,26 +64,58 @@ void init_layer12(void) {
 	}
 }
 
-void init_layer12_stuff(mpg123_handle *fr, real* (*init_table)(mpg123_handle *fr, real *table, int m)) {
+void init_layer12_stuff(mpg123_handle *fr, real* (*init_table)(mpg123_handle *fr, real *table, int m))
+{
 	int k;
 	real *table;
-	for(k=0;k<27;k++) {
+	for(k=0;k<27;k++)
+	{
 		table = init_table(fr, fr->muls[k], k);
 		*table++ = 0.0;
 	}
 }
 
-real* init_layer12_table(mpg123_handle *fr, real *table, int m) {
+real* init_layer12_table(mpg123_handle *fr, real *table, int m)
+{
+#if defined(REAL_IS_FIXED) && defined(PRECALC_TABLES)
 	int i;
 	for(i=0;i<63;i++)
 	*table++ = layer12_table[m][i];
+#else
+	int i,j;
+	for(j=3,i=0;i<63;i++,j--)
+	*table++ = DOUBLE_TO_REAL_SCALE_LAYER12(mulmul[m] * pow(2.0,(double) j / 3.0));
+#endif
 
 	return table;
 }
 
+#ifdef OPT_MMXORSSE
+real* init_layer12_table_mmx(mpg123_handle *fr, real *table, int m)
+{
+	int i,j;
+	if(!fr->p.down_sample) 
+	{
+		for(j=3,i=0;i<63;i++,j--)
+			*table++ = DOUBLE_TO_REAL(16384 * mulmul[m] * pow(2.0,(double) j / 3.0));
+	}
+	else
+	{
+		for(j=3,i=0;i<63;i++,j--)
+		*table++ = DOUBLE_TO_REAL(mulmul[m] * pow(2.0,(double) j / 3.0));
+	}
+	return table;
+}
+#endif
+
+#endif /* NO_LAYER12 */
+
 /* The rest is the actual decoding of layer II data. */
 
-void II_step_one(unsigned int *bit_alloc,int *scale,mpg123_handle *fr) {
+#ifndef NO_LAYER2
+
+static void II_step_one(unsigned int *bit_alloc,int *scale,mpg123_handle *fr)
+{
 	int stereo = fr->stereo-1;
 	int sblimit = fr->II_sblimit;
 	int jsbound = fr->jsbound;
@@ -75,13 +127,16 @@ void II_step_one(unsigned int *bit_alloc,int *scale,mpg123_handle *fr) {
 	int sc,step;
 
 	bita = bit_alloc;
-	if(stereo) {
-		for(i=jsbound;i;i--,alloc1+=(1<<step)) {
+	if(stereo)
+	{
+		for(i=jsbound;i;i--,alloc1+=(1<<step))
+		{
 			step=alloc1->bits;
 			*bita++ = (char) getbits(fr, step);
 			*bita++ = (char) getbits(fr, step);
 		}
-		for(i=sblimit-jsbound;i;i--,alloc1+=(1<<step)) {
+		for(i=sblimit-jsbound;i;i--,alloc1+=(1<<step))
+		{
 			step=alloc1->bits;
 			bita[0] = (char) getbits(fr, step);
 			bita[1] = bita[0];
@@ -92,8 +147,11 @@ void II_step_one(unsigned int *bit_alloc,int *scale,mpg123_handle *fr) {
 
 		for(i=sblimit2;i;i--)
 		if(*bita++) *scfsi++ = (char) getbits_fast(fr, 2);
-	}	else /* mono */	{
-		for(i=sblimit;i;i--,alloc1+=(1<<step)) {
+	}
+	else /* mono */
+	{
+		for(i=sblimit;i;i--,alloc1+=(1<<step))
+		{
 			step=alloc1->bits;
 			*bita++ = (char) getbits(fr, step);
 		}
@@ -107,7 +165,8 @@ void II_step_one(unsigned int *bit_alloc,int *scale,mpg123_handle *fr) {
 	scfsi=scfsi_buf;
 	for(i=sblimit2;i;i--)
 	if(*bita++)
-	switch(*scfsi++) {
+	switch(*scfsi++)
+	{
 		case 0: 
 			*scale++ = getbits_fast(fr, 6);
 			*scale++ = getbits_fast(fr, 6);
@@ -132,7 +191,8 @@ void II_step_one(unsigned int *bit_alloc,int *scale,mpg123_handle *fr) {
 }
 
 
-void II_step_two(unsigned int *bit_alloc,real fraction[2][4][SBLIMIT],int *scale,mpg123_handle *fr,int x1) {
+static void II_step_two(unsigned int *bit_alloc,real fraction[2][4][SBLIMIT],int *scale,mpg123_handle *fr,int x1)
+{
 	int i,j,k,ba;
 	int stereo = fr->stereo;
 	int sblimit = fr->II_sblimit;
@@ -266,11 +326,14 @@ static void II_select_table(mpg123_handle *fr)
 }
 
 
-int do_layer2(mpg123_handle *fr){
+int do_layer2(mpg123_handle *fr)
+{
 	int clip=0;
 	int i,j;
 	int stereo = fr->stereo;
-	real fraction[2][4][SBLIMIT]; /* pick_table clears unused subbands */
+	/* pick_table clears unused subbands */
+	/* replacement for real fraction[2][4][SBLIMIT], needs alignment. */
+	real (*fraction)[4][SBLIMIT] = fr->layer2.fraction;
 	unsigned int bit_alloc[64];
 	int scale[192];
 	int single = fr->single;
@@ -305,3 +368,4 @@ int do_layer2(mpg123_handle *fr){
 	return clip;
 }
 
+#endif /* NO_LAYER2 */

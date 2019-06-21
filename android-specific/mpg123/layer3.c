@@ -1,7 +1,7 @@
 /*
-	leyer3.c: the layer 3 decoder
+	layer3.c: the layer 3 decoder
 
-	copyright 1995-2008 by the mpg123 project - free software under the terms of the LGPL 2.1
+	copyright 1995-2017 by the mpg123 project - free software under the terms of the LGPL 2.1
 	see COPYING and AUTHORS files in distribution or http://mpg123.org
 	initially written by Michael Hipp
 
@@ -15,16 +15,41 @@
 */
 
 #include "mpg123lib_intern.h"
+#ifdef USE_NEW_HUFFTABLE
+#include "newhuffman.h"
+#else
 #include "huffman.h"
+#endif
 #include "getbits.h"
+#include "debug.h"
+
+
 
 /* define CUT_SFB21 if you want to cut-off the frequency above 16kHz */
 #if 0
 #define CUT_SFB21
 #endif
 
+#ifdef REAL_IS_FIXED
 #define NEW_DCT9
 #include "l3_integer_tables.h"
+#else
+/* static one-time calculated tables... or so */
+static real ispow[8207];
+static real aa_ca[8],aa_cs[8];
+static ALIGNED(16) real win[4][36];
+static ALIGNED(16) real win1[4][36];
+real COS9[9]; /* dct36_3dnow wants to use that */
+static real COS6_1,COS6_2;
+real tfcos36[9]; /* dct36_3dnow wants to use that */
+static real tfcos12[3];
+#define NEW_DCT9
+#ifdef NEW_DCT9
+static real cos9[3],cos18[3];
+static real tan1_1[16],tan2_1[16],tan1_2[16],tan2_2[16];
+static real pow1_1[2][32],pow2_1[2][32],pow1_2[2][32],pow2_2[2][32];
+#endif
+#endif
 
 /* Decoder state data, living on the stack of do_layer3. */
 
@@ -37,9 +62,9 @@ struct gr_info_s
 	unsigned block_type;
 	unsigned mixed_block_flag;
 	unsigned table_select[3];
-	unsigned subblock_gain[3];
-	unsigned maxband[3];
-	unsigned maxbandl;
+	/* Making those two signed int as workaround for open64/pathscale/sun compilers, and also for consistency, since they're worked on together with other signed variables. */
+	int maxband[3];
+	int maxbandl;
 	unsigned maxb;
 	unsigned region1start;
 	unsigned region2start;
@@ -60,14 +85,14 @@ struct III_sideinfo
 
 struct bandInfoStruct
 {
-	int longIdx[23];
-	int longDiff[22];
-	int shortIdx[14];
-	int shortDiff[13];
+	unsigned short longIdx[23];
+	unsigned char longDiff[22];
+	unsigned short shortIdx[14];
+	unsigned char shortDiff[13];
 };
 
 /* Techy details about our friendly MPEG data. Fairly constant over the years;-) */
-const struct bandInfoStruct bandInfo[9] =
+static const struct bandInfoStruct bandInfo[9] =
 {
 	{ /* MPEG 1.0 */
 		{0,4,8,12,16,20,24,30,36,44,52,62,74, 90,110,134,162,196,238,288,342,418,576},
@@ -136,33 +161,131 @@ static unsigned int i_slen2[256]; /* MPEG 2.0 slen for intensity stereo */
 
 /* Some helpers used in init_layer3 */
 
+#ifdef OPT_MMXORSSE
+real init_layer3_gainpow2_mmx(mpg123_handle *fr, int i)
+{
+	if(!fr->p.down_sample) return DOUBLE_TO_REAL(16384.0 * pow((double)2.0,-0.25 * (double) (i+210) ));
+	else return DOUBLE_TO_REAL(pow((double)2.0,-0.25 * (double) (i+210)));
+}
+#endif
 
-real init_layer3_gainpow2(mpg123_handle *fr, int i) {
+real init_layer3_gainpow2(mpg123_handle *fr, int i)
+{
+#if defined(REAL_IS_FIXED) && defined(PRECALC_TABLES)
 	return gainpow2[i+256];
+#else
+	return DOUBLE_TO_REAL_SCALE_LAYER3(pow((double)2.0,-0.25 * (double) (i+210)),i+256);
+#endif
 }
 
 
 /* init tables for layer-3 ... specific with the downsampling... */
-void init_layer3(void) {
+void init_layer3(void)
+{
 	int i,j,k,l;
 
+#if !defined(REAL_IS_FIXED) || !defined(PRECALC_TABLES)
+	for(i=0;i<8207;i++)
+	ispow[i] = DOUBLE_TO_REAL_POW43(pow((double)i,(double)4.0/3.0));
 
-	for(j=0;j<4;j++) {
+	for(i=0;i<8;i++)
+	{
+		const double Ci[8] = {-0.6,-0.535,-0.33,-0.185,-0.095,-0.041,-0.0142,-0.0037};
+		double sq = sqrt(1.0+Ci[i]*Ci[i]);
+		aa_cs[i] = DOUBLE_TO_REAL(1.0/sq);
+		aa_ca[i] = DOUBLE_TO_REAL(Ci[i]/sq);
+	}
+
+	for(i=0;i<18;i++)
+	{
+		win[0][i]    = win[1][i]    =
+			DOUBLE_TO_REAL( 0.5*sin(M_PI/72.0 * (double)(2*(i+0) +1)) / cos(M_PI * (double)(2*(i+0) +19) / 72.0) );
+		win[0][i+18] = win[3][i+18] =
+			DOUBLE_TO_REAL( 0.5*sin(M_PI/72.0 * (double)(2*(i+18)+1)) / cos(M_PI * (double)(2*(i+18)+19) / 72.0) );
+	}
+	for(i=0;i<6;i++)
+	{
+		win[1][i+18] = DOUBLE_TO_REAL(0.5 / cos ( M_PI * (double) (2*(i+18)+19) / 72.0 ));
+		win[3][i+12] = DOUBLE_TO_REAL(0.5 / cos ( M_PI * (double) (2*(i+12)+19) / 72.0 ));
+		win[1][i+24] = DOUBLE_TO_REAL(0.5 * sin( M_PI / 24.0 * (double) (2*i+13) ) / cos ( M_PI * (double) (2*(i+24)+19) / 72.0 ));
+		win[1][i+30] = win[3][i] = DOUBLE_TO_REAL(0.0);
+		win[3][i+6 ] = DOUBLE_TO_REAL(0.5 * sin( M_PI / 24.0 * (double) (2*i+1 ) ) / cos ( M_PI * (double) (2*(i+6 )+19) / 72.0 ));
+	}
+
+	for(i=0;i<9;i++)
+	COS9[i] = DOUBLE_TO_REAL(cos( M_PI / 18.0 * (double) i));
+
+	for(i=0;i<9;i++)
+	tfcos36[i] = DOUBLE_TO_REAL(0.5 / cos ( M_PI * (double) (i*2+1) / 36.0 ));
+
+	for(i=0;i<3;i++)
+	tfcos12[i] = DOUBLE_TO_REAL(0.5 / cos ( M_PI * (double) (i*2+1) / 12.0 ));
+
+	COS6_1 = DOUBLE_TO_REAL(cos( M_PI / 6.0 * (double) 1));
+	COS6_2 = DOUBLE_TO_REAL(cos( M_PI / 6.0 * (double) 2));
+
+#ifdef NEW_DCT9
+	cos9[0]  = DOUBLE_TO_REAL(cos(1.0*M_PI/9.0));
+	cos9[1]  = DOUBLE_TO_REAL(cos(5.0*M_PI/9.0));
+	cos9[2]  = DOUBLE_TO_REAL(cos(7.0*M_PI/9.0));
+	cos18[0] = DOUBLE_TO_REAL(cos(1.0*M_PI/18.0));
+	cos18[1] = DOUBLE_TO_REAL(cos(11.0*M_PI/18.0));
+	cos18[2] = DOUBLE_TO_REAL(cos(13.0*M_PI/18.0));
+#endif
+
+	for(i=0;i<12;i++)
+	{
+		win[2][i] = DOUBLE_TO_REAL(0.5 * sin( M_PI / 24.0 * (double) (2*i+1) ) / cos ( M_PI * (double) (2*i+7) / 24.0 ));
+	}
+
+	for(i=0;i<16;i++)
+	{
+		double t = tan( (double) i * M_PI / 12.0 );
+		tan1_1[i] = DOUBLE_TO_REAL_15(t / (1.0+t));
+		tan2_1[i] = DOUBLE_TO_REAL_15(1.0 / (1.0 + t));
+		tan1_2[i] = DOUBLE_TO_REAL_15(M_SQRT2 * t / (1.0+t));
+		tan2_2[i] = DOUBLE_TO_REAL_15(M_SQRT2 / (1.0 + t));
+	}
+
+	for(i=0;i<32;i++)
+	{
+		for(j=0;j<2;j++)
+		{
+			double base = pow(2.0,-0.25*(j+1.0));
+			double p1=1.0,p2=1.0;
+			if(i > 0)
+			{
+				if( i & 1 ) p1 = pow(base,(i+1.0)*0.5);
+				else p2 = pow(base,i*0.5);
+			}
+			pow1_1[j][i] = DOUBLE_TO_REAL_15(p1);
+			pow2_1[j][i] = DOUBLE_TO_REAL_15(p2);
+			pow1_2[j][i] = DOUBLE_TO_REAL_15(M_SQRT2 * p1);
+			pow2_2[j][i] = DOUBLE_TO_REAL_15(M_SQRT2 * p2);
+		}
+	}
+#endif
+
+	for(j=0;j<4;j++)
+	{
 		const int len[4] = { 36,36,12,36 };
 		for(i=0;i<len[j];i+=2) win1[j][i] = + win[j][i];
 
 		for(i=1;i<len[j];i+=2) win1[j][i] = - win[j][i];
 	}
 
-	for(j=0;j<9;j++) {
+	for(j=0;j<9;j++)
+	{
 		const struct bandInfoStruct *bi = &bandInfo[j];
 		int *mp;
 		int cb,lwin;
-		const int *bdf;
+		const unsigned char *bdf;
+		int switch_idx;
 
 		mp = map[j][0] = mapbuf0[j];
 		bdf = bi->longDiff;
-		for(i=0,cb = 0; cb < 8 ; cb++,i+=*bdf++)
+		switch_idx = (j < 3) ? 8 : 6;
+		for(i=0,cb = 0; cb < switch_idx ; cb++,i+=*bdf++)
 		{
 			*mp++ = (*bdf) >> 1;
 			*mp++ = i;
@@ -250,7 +373,8 @@ void init_layer3(void) {
 }
 
 
-void init_layer3_stuff(mpg123_handle *fr, real (*gainpow2)(mpg123_handle *fr, int i)) {
+void init_layer3_stuff(mpg123_handle *fr, real (*gainpow2)(mpg123_handle *fr, int i))
+{
 	int i,j;
 
 	for(i=-256;i<118+4;i++)	fr->gainpow2[i+256] = gainpow2(fr,i);
@@ -290,7 +414,7 @@ static int III_get_side_info(mpg123_handle *fr, struct III_sideinfo *si,int ster
 
 	if(si->main_data_begin > fr->bitreservoir)
 	{
-		if(VERBOSE2) fprintf(stderr, "Note: missing %d bytes in bit reservoir for frame %li\n", (int)(si->main_data_begin - fr->bitreservoir), (long)fr->num);
+		if(!fr->to_ignore && VERBOSE2) fprintf(stderr, "Note: missing %d bytes in bit reservoir for frame %li\n", (int)(si->main_data_begin - fr->bitreservoir), (long)fr->num);
 
 		/*  overwrite main_data_begin for the really available bit reservoir */
 		backbits(fr, tab[1]);
@@ -336,11 +460,21 @@ static int III_get_side_info(mpg123_handle *fr, struct III_sideinfo *si,int ster
 
 		gr_info->part2_3_length = getbits(fr, 12);
 		gr_info->big_values = getbits(fr, 9);
-		if(gr_info->big_values > 288) gr_info->big_values = 288;
+		if(gr_info->big_values > 288)
+		{
+			if(NOQUIET) error("big_values too large!");
+			gr_info->big_values = 288;
+		}
 		gr_info->pow2gain = fr->gainpow2+256 - getbits_fast(fr, 8) + powdiff;
 		if(ms_stereo) gr_info->pow2gain += 2;
-
 		gr_info->scalefac_compress = getbits(fr, tab[4]);
+		if(gr_info->part2_3_length == 0)
+		{
+			if(gr_info->scalefac_compress > 0)
+				debug1( "scalefac_compress _should_ be zero instead of %i"
+				,	gr_info->scalefac_compress );
+			gr_info->scalefac_compress = 0;
+		}
 
 		if(get1bit(fr))
 		{ /* window switch flag  */
@@ -357,7 +491,11 @@ static int III_get_side_info(mpg123_handle *fr, struct III_sideinfo *si,int ster
 			for(i=0;i<3;i++)
 			gr_info->full_gain[i] = gr_info->pow2gain + (getbits_fast(fr, 3)<<3);
 
-			if(gr_info->block_type == 0) return 1;
+			if(gr_info->block_type == 0)
+			{
+				if(NOQUIET) error("Blocktype == 0 and window-switching == 1 not allowed.");
+				return 1;
+			}
 
 			/* region_count/start parameters are implicit in this case. */       
 			if( (!fr->lsf || (gr_info->block_type == 2)) && !fr->mpeg25)
@@ -373,6 +511,7 @@ static int III_get_side_info(mpg123_handle *fr, struct III_sideinfo *si,int ster
 					if((gr_info->block_type == 2) && (!gr_info->mixed_block_flag) ) r0c = 5;
 					else r0c = 7;
 
+					/* r0c+1+r1c+1 == 22, always. */
 					r1c = 20 - r0c;
 					gr_info->region1start = bandInfo[sfreq].longIdx[r0c+1] >> 1 ;
 					gr_info->region2start = bandInfo[sfreq].longIdx[r0c+1+r1c+1] >> 1; 
@@ -390,12 +529,12 @@ static int III_get_side_info(mpg123_handle *fr, struct III_sideinfo *si,int ster
 			for (i=0; i<3; i++)
 			gr_info->table_select[i] = getbits_fast(fr, 5);
 
-			r0c = getbits_fast(fr, 4);
-			r1c = getbits_fast(fr, 3);
+			r0c = getbits_fast(fr, 4); /* 0 .. 15 */
+			r1c = getbits_fast(fr, 3); /* 0 .. 7 */
 			gr_info->region1start = bandInfo[sfreq].longIdx[r0c+1] >> 1 ;
-			gr_info->region2start = bandInfo[sfreq].longIdx[r0c+1+r1c+1] >> 1;
 
-			if(r0c + r1c + 2 > 22) gr_info->region2start = 576>>1;
+			/* max(r0c+r1c+2) = 15+7+2 = 24 */
+			if(r0c+1+r1c+1 > 22) gr_info->region2start = 576>>1;
 			else gr_info->region2start = bandInfo[sfreq].longIdx[r0c+1+r1c+1] >> 1;
 
 			gr_info->block_type = 0;
@@ -421,6 +560,14 @@ static int III_get_scale_factors_1(mpg123_handle *fr, int *scf,struct gr_info_s 
 	int numbits;
 	int num0 = slen[0][gr_info->scalefac_compress];
 	int num1 = slen[1][gr_info->scalefac_compress];
+
+	if(gr_info->part2_3_length == 0)
+	{
+		int i;
+		for(i=0;i<39;i++)
+			*scf++ = 0;
+		return 0;
+	}
 
 	if(gr_info->block_type == 2)
 	{
@@ -536,6 +683,14 @@ static int III_get_scale_factors_2(mpg123_handle *fr, int *scf,struct gr_info_s 
 
 	pnt = stab[n][(slen>>12)&0x7];
 
+	if(gr_info->part2_3_length == 0)
+	{
+		int i;
+		for(i=0;i<39;i++)
+			*scf++ = 0;
+		return 0;
+	}
+
 	for(i=0;i<4;i++)
 	{
 		int num = slen & 0x7;
@@ -549,15 +704,18 @@ static int III_get_scale_factors_2(mpg123_handle *fr, int *scf,struct gr_info_s 
 		else
 		for(j=0;j<(int)(pnt[i]);j++) *scf++ = 0;
 	}
-  
+
 	n = (n << 1) + 1;
 	for(i=0;i<n;i++) *scf++ = 0;
 
 	return numbits;
 }
 
-static const int pretab1[22] = {0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,2,2,3,3,3,2,0};
-static const int pretab2[22] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static unsigned char pretab_choice[2][22] =
+{
+	{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+	{0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,2,2,3,3,3,2,0}
+};
 
 /*
 	Dequantize samples
@@ -565,12 +723,30 @@ static const int pretab2[22] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 */
 
 /* 24 is enough because tab13 has max. a 19 bit huffvector */
-#define BITSHIFT ((sizeof(long)-1)*8)
+/* The old code played games with shifting signed integers around in not quite */
+/* legal ways. Also, it used long where just 32 bits are required. This could */
+/* be good or bad on 64 bit architectures ... anyway, making clear that */
+/* 32 bits suffice is a benefit. */
+#if 0
+/* To reconstruct old code, use this: */
+#define MASK_STYPE long
+#define MASK_UTYPE unsigned long
+#define MASK_TYPE MASK_STYPE
+#define MSB_MASK (mask < 0)
+#else
+/* This should be more proper: */
+#define MASK_STYPE int32_t
+#define MASK_UTYPE uint32_t
+#define MASK_TYPE  MASK_UTYPE
+#define MSB_MASK ((MASK_UTYPE)mask & (MASK_UTYPE)1<<(sizeof(MASK_TYPE)*8-1))
+#endif
+#define BITSHIFT ((sizeof(MASK_TYPE)-1)*8)
 #define REFRESH_MASK \
 	while(num < BITSHIFT) { \
-		mask |= ((unsigned long)getbyte(fr))<<(BITSHIFT-num); \
+		mask |= ((MASK_UTYPE)getbyte(fr))<<(BITSHIFT-num); \
 		num += 8; \
 		part2remain -= 8; }
+/* Complicated way of checking for msb value. This used to be (mask < 0). */
 
 static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],int *scf, struct gr_info_s *gr_info,int sfreq,int part2bits)
 {
@@ -579,13 +755,21 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 	int l[3],l3;
 	int part2remain = gr_info->part2_3_length - part2bits;
 	int *me;
+#ifdef REAL_IS_FIXED
 	int gainpow2_scale_idx = 378;
+#endif
+
+	/* Assumption: If there is some part2_3_length at all, there should be
+	   enough of it to work with properly. In case of zero length we silently
+	   zero things. */
+	if(gr_info->part2_3_length > 0)
+	{
 
 	/* mhipp tree has this split up a bit... */
 	int num=getbitoffset(fr);
-	long mask;
+	MASK_TYPE mask;
 	/* We must split this, because for num==0 the shift is undefined if you do it in one step. */
-	mask  = ((unsigned long) getbits(fr, num))<<BITSHIFT;
+	mask  = ((MASK_UTYPE) getbits(fr, num))<<BITSHIFT;
 	mask <<= 8-num;
 	part2remain -= num;
 
@@ -593,7 +777,6 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 		int bv       = gr_info->big_values;
 		int region1  = gr_info->region1start;
 		int region2  = gr_info->region2start;
-		if(region1 > region2) return 1;
 		l3 = ((576>>1)-bv)>>1;   
 
 		/* we may lose the 'odd' bit here !! check this later again */
@@ -618,7 +801,14 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 			}
 		}
 	}
- 
+
+#define CHECK_XRPNT if(xrpnt >= &xr[SBLIMIT][0]) \
+{ \
+	if(NOQUIET) \
+		error2("attempted xrpnt overflow (%p !< %p)", (void*) xrpnt, (void*) &xr[SBLIMIT][0]); \
+	return 1; \
+}
+
 	if(gr_info->block_type == 2)
 	{
 		/* decoding with short or mixed mode BandIndex table */
@@ -646,10 +836,10 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 		for(i=0;i<2;i++)
 		{
 			int lp = l[i];
-			struct newhuff *h = ht+gr_info->table_select[i];
+			const struct newhuff *h = ht+gr_info->table_select[i];
 			for(;lp;lp--,mc--)
 			{
-				register int x,y;
+				register MASK_STYPE x,y;
 				if( (!mc) )
 				{
 					mc    = *m++;
@@ -658,38 +848,56 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 					cb    = *m++;
 					if(lwin == 3)
 					{
+#ifdef REAL_IS_FIXED
 						gainpow2_scale_idx = (int)(gr_info->pow2gain + (*scf << shift) - fr->gainpow2);
+#endif
 						v = gr_info->pow2gain[(*scf++) << shift];
 						step = 1;
 					}
 					else
 					{
+#ifdef REAL_IS_FIXED
 						gainpow2_scale_idx = (int)(gr_info->full_gain[lwin] + (*scf << shift) - fr->gainpow2);
+#endif
 						v = gr_info->full_gain[lwin][(*scf++) << shift];
 						step = 3;
 					}
 				}
 				{
-					register short *val = h->table;
+					const short *val = h->table;
 					REFRESH_MASK;
+#ifdef USE_NEW_HUFFTABLE
+					while((y=val[(MASK_UTYPE)mask>>(BITSHIFT+4)])<0)
+					{
+						val -= y;
+						num -= 4;
+						mask <<= 4;
+					}
+					num -= (y >> 8);
+					mask <<= (y >> 8);
+					x = (y >> 4) & 0xf;
+					y &= 0xf;
+#else
 					while((y=*val++)<0)
 					{
-						if (mask < 0) val -= y;
+						if (MSB_MASK) val -= y;
 
 						num--;
 						mask <<= 1;
 					}
 					x = y >> 4;
 					y &= 0xf;
+#endif
 				}
+				CHECK_XRPNT;
 				if(x == 15 && h->linbits)
 				{
 					max[lwin] = cb;
 					REFRESH_MASK;
-					x += ((unsigned long) mask) >> (BITSHIFT+8-h->linbits);
+					x += ((MASK_UTYPE) mask) >> (BITSHIFT+8-h->linbits);
 					num -= h->linbits+1;
 					mask <<= h->linbits;
-					if(mask < 0) *xrpnt = REAL_MUL_SCALE_LAYER3(-ispow[x], v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt = REAL_MUL_SCALE_LAYER3(-ispow[x], v, gainpow2_scale_idx);
 					else         *xrpnt = REAL_MUL_SCALE_LAYER3( ispow[x], v, gainpow2_scale_idx);
 
 					mask <<= 1;
@@ -697,7 +905,7 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 				else if(x)
 				{
 					max[lwin] = cb;
-					if(mask < 0) *xrpnt = REAL_MUL_SCALE_LAYER3(-ispow[x], v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt = REAL_MUL_SCALE_LAYER3(-ispow[x], v, gainpow2_scale_idx);
 					else         *xrpnt = REAL_MUL_SCALE_LAYER3( ispow[x], v, gainpow2_scale_idx);
 
 					num--;
@@ -706,14 +914,15 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 				else *xrpnt = DOUBLE_TO_REAL(0.0);
 
 				xrpnt += step;
+				CHECK_XRPNT;
 				if(y == 15 && h->linbits)
 				{
 					max[lwin] = cb;
 					REFRESH_MASK;
-					y += ((unsigned long) mask) >> (BITSHIFT+8-h->linbits);
+					y += ((MASK_UTYPE) mask) >> (BITSHIFT+8-h->linbits);
 					num -= h->linbits+1;
 					mask <<= h->linbits;
-					if(mask < 0) *xrpnt = REAL_MUL_SCALE_LAYER3(-ispow[y], v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt = REAL_MUL_SCALE_LAYER3(-ispow[y], v, gainpow2_scale_idx);
 					else         *xrpnt = REAL_MUL_SCALE_LAYER3( ispow[y], v, gainpow2_scale_idx);
 
 					mask <<= 1;
@@ -721,7 +930,7 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 				else if(y)
 				{
 					max[lwin] = cb;
-					if(mask < 0) *xrpnt = REAL_MUL_SCALE_LAYER3(-ispow[y], v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt = REAL_MUL_SCALE_LAYER3(-ispow[y], v, gainpow2_scale_idx);
 					else         *xrpnt = REAL_MUL_SCALE_LAYER3( ispow[y], v, gainpow2_scale_idx);
 
 					num--;
@@ -735,22 +944,17 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 
 		for(;l3 && (part2remain+num > 0);l3--)
 		{
-			struct newhuff* h;
-			register short* val;
+			const struct newhuff* h;
+			const short* val;
 			register short a;
-			/*
-				This is only a humble hack to prevent a special segfault.
-				More insight into the real workings is still needed.
-				Especially why there are (valid?) files that make xrpnt exceed the array with 4 bytes without segfaulting, more seems to be really bad, though.
-			*/
-			if(!(xrpnt < &xr[SBLIMIT][0]+5)) return 2;
+
 			h = htc+gr_info->count1table_select;
 			val = h->table;
 
 			REFRESH_MASK;
 			while((a=*val++)<0)
 			{
-				if(mask < 0) val -= a;
+				if(MSB_MASK) val -= a;
 
 				num--;
 				mask <<= 1;
@@ -773,26 +977,31 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 						cb = *m++;
 						if(lwin == 3)
 						{
+#ifdef REAL_IS_FIXED
 							gainpow2_scale_idx = (int)(gr_info->pow2gain + (*scf << shift) - fr->gainpow2);
+#endif
 							v = gr_info->pow2gain[(*scf++) << shift];
 							step = 1;
 						}
 						else
 						{
+#ifdef REAL_IS_FIXED
 							gainpow2_scale_idx = (int)(gr_info->full_gain[lwin] + (*scf << shift) - fr->gainpow2);
+#endif
 							v = gr_info->full_gain[lwin][(*scf++) << shift];
 							step = 3;
 						}
 					}
 					mc--;
 				}
+				CHECK_XRPNT;
 				if( (a & (0x8>>i)) )
 				{
 					max[lwin] = cb;
 					if(part2remain+num <= 0)
 					break;
 
-					if(mask < 0) *xrpnt = -REAL_SCALE_LAYER3(v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt = -REAL_SCALE_LAYER3(v, gainpow2_scale_idx);
 					else         *xrpnt =  REAL_SCALE_LAYER3(v, gainpow2_scale_idx);
 
 					num--;
@@ -810,6 +1019,7 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 			{
 				for(;mc > 0;mc--)
 				{
+					CHECK_XRPNT;
 					*xrpnt = DOUBLE_TO_REAL(0.0); xrpnt += 3; /* short band -> step=3 */
 					*xrpnt = DOUBLE_TO_REAL(0.0); xrpnt += 3;
 				}
@@ -840,7 +1050,7 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 	else
 	{
 		/* decoding with 'long' BandIndex table (block_type != 2) */
-		const int *pretab = gr_info->preflag ? pretab1 : pretab2;
+		const unsigned char *pretab = pretab_choice[gr_info->preflag];
 		int i,max = -1;
 		int cb = 0;
 		int *m = map[sfreq][2];
@@ -851,11 +1061,11 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 		for(i=0;i<3;i++)
 		{
 			int lp = l[i];
-			struct newhuff *h = ht+gr_info->table_select[i];
+			const struct newhuff *h = ht+gr_info->table_select[i];
 
 			for(;lp;lp--,mc--)
 			{
-				int x,y;
+				MASK_STYPE x,y;
 				if(!mc)
 				{
 					mc = *m++;
@@ -866,32 +1076,48 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 					else
 #endif
 					{
+#ifdef REAL_IS_FIXED
 						gainpow2_scale_idx = (int)(gr_info->pow2gain + (*scf << shift) - fr->gainpow2);
+#endif
 						v = gr_info->pow2gain[(*(scf++) + (*pretab++)) << shift];
 					}
 				}
 				{
-					register short *val = h->table;
+					const short *val = h->table;
 					REFRESH_MASK;
+#ifdef USE_NEW_HUFFTABLE
+					while((y=val[(MASK_UTYPE)mask>>(BITSHIFT+4)])<0)
+					{
+						val -= y;
+						num -= 4;
+						mask <<= 4;
+					}
+					num -= (y >> 8);
+					mask <<= (y >> 8);
+					x = (y >> 4) & 0xf;
+					y &= 0xf;
+#else
 					while((y=*val++)<0)
 					{
-						if (mask < 0) val -= y;
+						if (MSB_MASK) val -= y;
 
 						num--;
 						mask <<= 1;
 					}
 					x = y >> 4;
 					y &= 0xf;
+#endif
 				}
 
+				CHECK_XRPNT;
 				if(x == 15 && h->linbits)
 				{
 					max = cb;
 					REFRESH_MASK;
-					x += ((unsigned long) mask) >> (BITSHIFT+8-h->linbits);
+					x += ((MASK_UTYPE) mask) >> (BITSHIFT+8-h->linbits);
 					num -= h->linbits+1;
 					mask <<= h->linbits;
-					if(mask < 0) *xrpnt++ = REAL_MUL_SCALE_LAYER3(-ispow[x], v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt++ = REAL_MUL_SCALE_LAYER3(-ispow[x], v, gainpow2_scale_idx);
 					else         *xrpnt++ = REAL_MUL_SCALE_LAYER3( ispow[x], v, gainpow2_scale_idx);
 
 					mask <<= 1;
@@ -899,7 +1125,7 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 				else if(x)
 				{
 					max = cb;
-					if(mask < 0) *xrpnt++ = REAL_MUL_SCALE_LAYER3(-ispow[x], v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt++ = REAL_MUL_SCALE_LAYER3(-ispow[x], v, gainpow2_scale_idx);
 					else         *xrpnt++ = REAL_MUL_SCALE_LAYER3( ispow[x], v, gainpow2_scale_idx);
 					num--;
 
@@ -907,14 +1133,15 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 				}
 				else *xrpnt++ = DOUBLE_TO_REAL(0.0);
 
+				CHECK_XRPNT;
 				if(y == 15 && h->linbits)
 				{
 					max = cb;
 					REFRESH_MASK;
-					y += ((unsigned long) mask) >> (BITSHIFT+8-h->linbits);
+					y += ((MASK_UTYPE) mask) >> (BITSHIFT+8-h->linbits);
 					num -= h->linbits+1;
 					mask <<= h->linbits;
-					if(mask < 0) *xrpnt++ = REAL_MUL_SCALE_LAYER3(-ispow[y], v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt++ = REAL_MUL_SCALE_LAYER3(-ispow[y], v, gainpow2_scale_idx);
 					else         *xrpnt++ = REAL_MUL_SCALE_LAYER3( ispow[y], v, gainpow2_scale_idx);
 
 					mask <<= 1;
@@ -922,7 +1149,7 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 				else if(y)
 				{
 					max = cb;
-					if(mask < 0) *xrpnt++ = REAL_MUL_SCALE_LAYER3(-ispow[y], v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt++ = REAL_MUL_SCALE_LAYER3(-ispow[y], v, gainpow2_scale_idx);
 					else         *xrpnt++ = REAL_MUL_SCALE_LAYER3( ispow[y], v, gainpow2_scale_idx);
 
 					num--;
@@ -935,13 +1162,14 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 		/* short (count1table) values */
 		for(;l3 && (part2remain+num > 0);l3--)
 		{
-			struct newhuff *h = htc+gr_info->count1table_select;
-			register short *val = h->table,a;
+			const struct newhuff *h = htc+gr_info->count1table_select;
+			const short *val = h->table;
+			register short a;
 
 			REFRESH_MASK;
 			while((a=*val++)<0)
 			{
-				if (mask < 0) val -= a;
+				if (MSB_MASK) val -= a;
 
 				num--;
 				mask <<= 1;
@@ -966,19 +1194,22 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 						else
 #endif
 						{
+#ifdef REAL_IS_FIXED
 							gainpow2_scale_idx = (int)(gr_info->pow2gain + (*scf << shift) - fr->gainpow2);
+#endif
 							v = gr_info->pow2gain[((*scf++) + (*pretab++)) << shift];
 						}
 					}
 					mc--;
 				}
+				CHECK_XRPNT;
 				if( (a & (0x8>>i)) )
 				{
 					max = cb;
 					if(part2remain+num <= 0)
 					break;
 
-					if(mask < 0) *xrpnt++ = -REAL_SCALE_LAYER3(v, gainpow2_scale_idx);
+					if(MSB_MASK) *xrpnt++ = -REAL_SCALE_LAYER3(v, gainpow2_scale_idx);
 					else         *xrpnt++ =  REAL_SCALE_LAYER3(v, gainpow2_scale_idx);
 
 					num--;
@@ -995,6 +1226,17 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 	part2remain += num;
 	backbits(fr, num);
 	num = 0;
+	}
+	else
+	{
+		part2remain = 0;
+		/* Not entirely sure what good values are, must be > 0. */
+		gr_info->maxband[0] =
+		gr_info->maxband[1] =
+		gr_info->maxband[2] =
+		gr_info->maxbandl   = 1; /* sfb=maxband[lwin]*3 + lwin - mixed_block_flag must be >= 0 */
+		gr_info->maxb       = 1;
+	}
 
 	while(xrpnt < &xr[SBLIMIT][0]) 
 	*xrpnt++ = DOUBLE_TO_REAL(0.0);
@@ -1005,7 +1247,11 @@ static int III_dequantize_sample(mpg123_handle *fr, real xr[SBLIMIT][SSLIMIT],in
 		part2remain -= 16;
 	}
 	if(part2remain > 0) skipbits(fr, part2remain);
-	else if(part2remain < 0) return 1; /* -> error */
+	else if(part2remain < 0)
+	{
+		debug1("Can't rewind stream by %d bits!",-part2remain);
+		return 1; /* -> error */
+	}
 	return 0;
 }
 
@@ -1018,6 +1264,7 @@ static void III_i_stereo(real xr_buf[2][SBLIMIT][SSLIMIT],int *scalefac, struct 
 
 	const real *tab1,*tab2;
 
+#if 1
 	int tab;
 /* TODO: optimize as static */
 	const real *tabs[3][2][2] =
@@ -1030,6 +1277,35 @@ static void III_i_stereo(real xr_buf[2][SBLIMIT][SSLIMIT],int *scalefac, struct 
 	tab = lsf + (gr_info->scalefac_compress & lsf);
 	tab1 = tabs[tab][ms_stereo][0];
 	tab2 = tabs[tab][ms_stereo][1];
+#else
+	if(lsf)
+	{
+		int p = gr_info->scalefac_compress & 0x1;
+		if(ms_stereo)
+		{
+			tab1 = pow1_2[p];
+			tab2 = pow2_2[p];
+		}
+		else
+		{
+			tab1 = pow1_1[p];
+			tab2 = pow2_1[p];
+		}
+	}
+	else
+	{
+		if(ms_stereo)
+		{
+			tab1 = tan1_2;
+			tab2 = tan2_2;
+		}
+		else
+		{
+			tab1 = tan1_1;
+			tab2 = tan2_1;
+		}
+	}
+#endif
 
 	if(gr_info->block_type == 2)
 	{
@@ -1060,11 +1336,17 @@ static void III_i_stereo(real xr_buf[2][SBLIMIT][SSLIMIT],int *scalefac, struct 
 				}
 			}
 
+#if 1
 /* in the original: copy 10 to 11 , here: copy 11 to 12 
 maybe still wrong??? (copy 12 to 13?) */
 			is_p = scalefac[11*3+lwin-gr_info->mixed_block_flag]; /* scale: 0-15 */
 			sb   = bi->shortDiff[12];
 			idx  = bi->shortIdx[12] + lwin;
+#else
+			is_p = scalefac[10*3+lwin-gr_info->mixed_block_flag]; /* scale: 0-15 */
+			sb   = bi->shortDiff[11];
+			idx  = bi->shortIdx[11] + lwin;
+#endif
 			if(is_p != 7)
 			{
 				real t1,t2;
@@ -1240,6 +1522,7 @@ void dct36(real *inbuf,real *o1,real *o2,real *wintab,real *tsbuf)
 
 
 #ifdef NEW_DCT9
+#if 1
 		{
 			real t3;
 			{
@@ -1297,6 +1580,49 @@ void dct36(real *inbuf,real *o1,real *o2,real *wintab,real *tsbuf)
 			tmp[6] -= t2;
 		}
 
+#else
+		{
+			real t0, t1, t2, t3, t4, t5, t6, t7;
+
+			t1 = REAL_MUL(COS6_2, in[12]);
+			t2 = REAL_MUL(COS6_2, (in[8] + in[16] - in[4]));
+
+			t3 = in[0] + t1;
+			t4 = in[0] - t1 - t1;
+			t5     = t4 - t2;
+			tmp[4] = t4 + t2 + t2;
+
+			t0 = REAL_MUL(cos9[0], (in[4] + in[8]));
+			t1 = REAL_MUL(cos9[1], (in[8] - in[16]));
+
+			t2 = REAL_MUL(cos9[2], (in[4] + in[16]));
+
+			t6 = t3 - t0 - t2;
+			t0 += t3 + t1;
+			t3 += t2 - t1;
+
+			t2 = REAL_MUL(cos18[0], (in[2]  + in[10]));
+			t4 = REAL_MUL(cos18[1], (in[10] - in[14]));
+			t7 = REAL_MUL(COS6_1, in[6]);
+
+			t1 = t2 + t4 + t7;
+			tmp[0] = t0 + t1;
+			tmp[8] = t0 - t1;
+			t1 = REAL_MUL(cos18[2], (in[2] + in[14]));
+			t2 += t1 - t7;
+
+			tmp[3] = t3 + t2;
+			t0 = REAL_MUL(COS6_1, (in[10] + in[14] - in[2]));
+			tmp[5] = t3 - t2;
+
+			t4 -= t1 + t7;
+
+			tmp[1] = t5 - t0;
+			tmp[7] = t5 + t0;
+			tmp[2] = t6 + t4;
+			tmp[6] = t6 - t4;
+		}
+#endif
 
 		{
 			real t0, t1, t2, t3, t4, t5, t6, t7;
@@ -1685,14 +2011,20 @@ int do_layer3(mpg123_handle *fr)
 
 	/* quick hack to keep the music playing */
 	/* after having seen this nasty test file... */
-	if(III_get_side_info(fr, &sideinfo,stereo,ms_stereo,sfreq,single)) return clip;
+	if(III_get_side_info(fr, &sideinfo,stereo,ms_stereo,sfreq,single))
+	{
+		if(NOQUIET) error("bad frame - unable to get valid sideinfo");
+		return clip;
+	}
 
 	set_pointer(fr,sideinfo.main_data_begin);
 
 	for(gr=0;gr<granules;gr++)
 	{
-		real hybridIn[2][SBLIMIT][SSLIMIT];
-		real hybridOut[2][SSLIMIT][SBLIMIT];
+		/*  hybridIn[2][SBLIMIT][SSLIMIT] */
+		real (*hybridIn)[SBLIMIT][SSLIMIT] = fr->layer3.hybrid_in;
+		/*  hybridOut[2][SSLIMIT][SBLIMIT] */
+		real (*hybridOut)[SSLIMIT][SBLIMIT] = fr->layer3.hybrid_out;
 
 		{
 			struct gr_info_s *gr_info = &(sideinfo.ch[0].gr[gr]);
@@ -1702,7 +2034,11 @@ int do_layer3(mpg123_handle *fr)
 			else
 			part2bits = III_get_scale_factors_1(fr, scalefacs[0],gr_info,0,gr);
 
-			if(III_dequantize_sample(fr, hybridIn[0], scalefacs[0],gr_info,sfreq,part2bits)) return clip;
+			if(III_dequantize_sample(fr, hybridIn[0], scalefacs[0],gr_info,sfreq,part2bits))
+			{
+				if(VERBOSE2) error("dequantization failed!");
+				return clip;
+			}
 		}
 
 		if(stereo == 2)
@@ -1714,9 +2050,14 @@ int do_layer3(mpg123_handle *fr)
 			else
 			part2bits = III_get_scale_factors_1(fr, scalefacs[1],gr_info,1,gr);
 
-			if(III_dequantize_sample(fr, hybridIn[1],scalefacs[1],gr_info,sfreq,part2bits)) return clip;
+			if(III_dequantize_sample(fr, hybridIn[1],scalefacs[1],gr_info,sfreq,part2bits))
+			{
+				if(VERBOSE2) error("dequantization failed!");
+				return clip;
+			}
 
-			if(ms_stereo) {
+			if(ms_stereo)
+			{
 				int i;
 				unsigned int maxb = sideinfo.ch[0].gr[gr].maxb;
 				if(sideinfo.ch[1].gr[gr].maxb > maxb) maxb = sideinfo.ch[1].gr[gr].maxb;
@@ -1768,6 +2109,10 @@ int do_layer3(mpg123_handle *fr)
 			III_hybrid(hybridIn[ch], hybridOut[ch], ch,gr_info, fr);
 		}
 
+#ifdef OPT_I486
+		if(single != SINGLE_STEREO || fr->af.encoding != MPG123_ENC_SIGNED_16 || fr->down_sample != 0)
+		{
+#endif
 		for(ss=0;ss<SSLIMIT;ss++)
 		{
 			if(single != SINGLE_STEREO)
@@ -1776,8 +2121,26 @@ int do_layer3(mpg123_handle *fr)
 			clip += (fr->synth_stereo)(hybridOut[0][ss], hybridOut[1][ss], fr);
 
 		}
+#ifdef OPT_I486
+		} else
+		{
+			/* Only stereo, 16 bits benefit from the 486 optimization. */
+			ss=0;
+			while(ss < SSLIMIT)
+			{
+				int n;
+				n=(fr->buffer.size - fr->buffer.fill) / (2*2*32);
+				if(n > (SSLIMIT-ss)) n=SSLIMIT-ss;
+
+				/* Clip counting makes no sense with this function. */
+				absynth_1to1_i486(hybridOut[0][ss], 0, fr, n);
+				absynth_1to1_i486(hybridOut[1][ss], 1, fr, n);
+				ss+=n;
+				fr->buffer.fill+=(2*2*32)*n;
+			}
+		}
+#endif
 	}
   
 	return clip;
 }
-

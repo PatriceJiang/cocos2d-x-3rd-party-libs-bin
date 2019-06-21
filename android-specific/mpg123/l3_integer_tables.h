@@ -9,7 +9,9 @@
 #ifndef MPG123_L3_INTEGER_TABLES_H
 #define MPG123_L3_INTEGER_TABLES_H
 
-static const real ispow[8207] = {
+#ifdef PRECALC_TABLES
+static const real ispow[8207] =
+{
 	0,8192,20643,35445,52016,70041,89315,109695,131072,153360,
 	176491,200407,225060,250408,276414,303048,330281,358087,386444,415331,
 	444730,474623,504995,535830,567116,598839,630988,663552,696521,729884,
@@ -962,6 +964,22 @@ static const real gainpow2[256+118+4] =
 	8,7,6,5,4,3,3,2,2,2,
 	1,1,1,1,1,1,1,
 };
+
+#else
+static real ispow[8207];
+static real aa_ca[8],aa_cs[8];
+static real win[4][36];
+static real win1[4][36];
+real COS9[9]; /* dct36_3dnow wants to use that */
+static real COS6_1,COS6_2;
+real tfcos36[9]; /* dct36_3dnow wants to use that */
+static real tfcos12[3];
+#ifdef NEW_DCT9
+static real cos9[3],cos18[3];
+static real tan1_1[16],tan2_1[16],tan1_2[16],tan2_2[16];
+static real pow1_1[2][16],pow2_1[2][16],pow1_2[2][16],pow2_2[2][16];
+#endif
+#endif
 
 static real win1[4][36];
 
